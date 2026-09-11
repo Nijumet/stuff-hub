@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Hallucination Generator</title>
+<style>
+    :root {
+        --bg: #f4f4f4;
+        --card-bg: #ffffff;
+        --accent: #333333;
+        --accent-soft: #555555;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+        font-family: Georgia, serif;
+        background: var(--bg);
+        margin: 0;
+        padding: 40px 16px;
+        display: flex;
+        justify-content: center;
+    }
+
+    .app {
+        max-width: 900px;
+        width: 100%;
+    }
+
+    h1 {
+        text-align: center;
+        margin-bottom: 10px;
+    }
+
+    .subtitle {
+        text-align: center;
+        margin-bottom: 24px;
+        color: #555;
+    }
+
+    .panel {
+        background: var(--card-bg);
+        border-radius: 12px;
+        padding: 20px 24px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+        margin-bottom: 20px;
+    }
+
+    .controls-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px 24px;
+        align-items: center;
+    }
+
+    .control-group { text-align: left; }
+
+    .control-label {
+        font-size: 14px;
+        font-weight: bold;
+        margin-bottom: 4px;
+        display: block;
+        color: #444;
+    }
+
+    .toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+    }
+
+    button {
+        padding: 10px 22px;
+        font-size: 16px;
+        border: none;
+        border-radius: 999px;
+        background: var(--accent);
+        color: white;
+        cursor: pointer;
+        transition: background 0.15s ease, transform 0.05s ease;
+    }
+
+    button:hover { background: var(--accent-soft); }
+    button:active { transform: translateY(1px); }
+
+    input[type="checkbox"] { transform: scale(1.1); cursor: pointer; }
+    input[type="range"] { width: 100%; }
+
+    select {
+        width: 100%;
+        padding: 6px 8px;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+        font-size: 14px;
+    }
+
+    #countDisplay { font-weight: bold; }
+
+    #saying {
+        font-size: 17px;
+        margin-top: 10px;
+        background: var(--card-bg);
+        padding: 20px 24px;
+        border-radius: 12px;
+        min-height: 180px;
+        white-space: pre-wrap;
+        line-height: 1.5;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+    }
+</style>
+</head>
+<body>
+
+<div class="app">
+    <h1>Hallucination Generator</h1>
+    <div class="subtitle">Tired of having to tell when AI is hallucinating? Our new model always hallucinates, so you don't have  to worry.</div>
+
+    <div class="panel">
+        <div class="controls-grid">
+
+            <div class="control-group">
+                <span class="control-label">Generate</span>
+                <button onclick="generate()">Generate Output</button>
+            </div>
+
+            <div class="control-group">
+                <span class="control-label">Modes</span>
+                <div class="toggle-row">
+                    <input type="checkbox" id="hallucinationToggle">
+                    <label for="hallucinationToggle">Technical Jargon</label>
+                </div>
+                <div class="toggle-row">
+                    <input type="checkbox" id="rambleToggle">
+                    <label for="rambleToggle">Ramble (1000 sentences)</label>
+                </div>
+                <div class="toggle-row">
+                    <input type="checkbox" id="degenerateToggle">
+                    <label for="degenerateToggle">Degeneration (Content Slowly Degrades to Nonense)</label>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <span class="control-label">Sentence count</span>
+                <div style="margin-bottom:4px;">Current: <span id="countDisplay">10</span></div>
+                <input type="range" id="sentenceSlider" min="3" max="100" value="10"
+                       oninput="document.getElementById('countDisplay').textContent=this.value">
+            </div>
+
+            <div class="control-group">
+                <span class="control-label">Output format</span>
+                <select id="templateSelect">
+                    <option value="essay">Essay</option>
+                    <option value="resume">Résumé</option>
+                </select>
+            </div>
+
+        </div>
+    </div>
+
+    <div id="saying">Click “Generate Output” to begin…</div>
+</div>
+
+<script>
+// =====================
+// Word banks
+// =====================
+const nouns = [
+    "cow","dog","bear","man","woman","person","snow","leaf","wind","bug",
+    "glitch","program","brush","stick","blob","flute","trumpet","AI","book",
+    "chair","video","yard","grass","teacher","shadow","river","cloud","machine",
+    "spirit","pumpkin","mirror","pigeon","wizard","server","pickle","algorithm",
+    "hamster","void","skeleton","lantern","forest","planet","candle","robot",
+    "castle","marble","feather","storm","cactus","pillow","turtle","engine",
+    "moon","sun","star","mountain","valley","ocean","island","pocket","dream",
+    "memory","signal","tower","cobweb","mushroom","portal","goblin","circuit",
+    "battery","helmet","scroll","compass","whale","sparrow","cabbage","noodle",
+    "crown","pebble","soda","archive","oracle","dust","peach","cannon","siren",
+    "relic","gourd","cryptid","parasite","idol","specter","gremlin","fossil",
+    "talisman","nightmare","eyeball","monolith"
+];
+
+const verbs = [
+    "run","trip","fall","die","burn","jump","embezzle","con","rob","fly",
+    "control","crush","twist","read","rip","vibrate","evaporate","melt",
+    "whisper","consume","haunt","wander","collapse","ignite","scatter",
+    "summon","fracture","glow","shuffle","erupt","spiral","drift","hover",
+    "chant","murmur","devour","unravel","pulse","shiver","glimmer","warp",
+    "distort","inflate","deflate","absorb","radiate","stumble","beckon",
+    "gnaw","levitate","implode","detonate","slither","crawl","sprint",
+    "echo","flicker","swell","dissolve","perish","spawn","infect","corrupt",
+    "pierce","torment","obliterate","howl","invert","mutate"
+];
+
+const adjectives = [
+    "slimy","smooth","shiny","hot","cold","bright","dark","evil","demonic",
+    "suicidal","hard","fluffy","long","ancient","mystic","crooked","glorious",
+    "rusty","haunted","feral","cosmic","unhinged","fragile","massive","tiny",
+    "electric","hollow","vibrant","ashen","glittering","melting","fractured",
+    "ominous","radiant","sacred","cursed","luminous","soggy","crimson",
+    "frozen","volatile","timeless","jagged","serene","chaotic","primordial",
+    "forgotten","enchanted","moldy","brittle","vile","ethereal","murky",
+    "fuzzy","screaming","eldritch","deranged","sticky","boiling","skeletal",
+    "plush","vicious","tattered","gargantuan","whispering","radioactive",
+    "sentient","rabid","gelatinous","forbidden","infinite"
+];
+
+const connectors = [
+    "ye","nay","shan't","which","may","or","and","the","of","da","unto",
+    "beyond","within","after","before","amid","among","against","toward",
+    "beneath","above"
+];
+
+// Hallucination banks
+const hallucinationNouns = [
+    "quantum substrate","semantic manifold","hypervector array","cognitive kernel",
+    "recursive ontology","latent corridor","neural lattice","entropy cluster",
+    "probability filament","contextual residue","algorithmic phantom",
+    "synthetic oracle","paradox engine","memory vortex","causal membrane",
+    "spectral index","meta-gradient","logic aperture","dream protocol",
+    "hyperdimensional spool","conceptual artifact"
+];
+
+const hallucinationVerbs = [
+    "approximate","synthesize","recontextualize","instantiate","propagate",
+    "retrofit","misalign","hyperextend","denormalize","transduce",
+    "overfit","hallucinate","de-vectorize","re-embed","misclassify",
+    "phase-shift","interpolate","fabricate","deconstruct","re-quantize"
+];
+
+const hallucinationAdjectives = [
+    "nonlinear","paradoxical","emergent","latent","recursive","spectral",
+    "hyperdimensional","synthetic","illusory","probabilistic","unstable",
+    "contextual","misaligned","pseudo-coherent","stochastic","inverted",
+    "self-referential","unbounded","degenerate","meta-synthetic"
+];
+
+// Name generator
+const firstNames = [
+    "Glarb","Mivon","Trella","Zorik","Pallin","Eshka","Rovik","Dreema",
+    "Hollis","Varn","Kelra","Jom","Sivra","Tenn","Worla"
+];
+
+const lastNames = [
+    "Flintgrove","Marrowick","Pendles","Vorstrum","Greeble","Hask","Tallow",
+    "Brimwater","Sootvale","Drim","Krell","Mossford","Vindle","Rask"
+];
+
+// Patterns
+const patterns = [
+    "{A1} {N1} {V1} {C1} {N2}.",
+    "{N1} {C1} {N2}, {N3} {V1} {A1}.",
+    "When {N1} {V1} {C1} {N2}, the {A1} {N3} shall rise.",
+    "Only the {A1} {N1} knows why {N2} must {V1}.",
+    "Behold: {N1} {V1} {C1} the {A1} {N2}.",
+    "In the age of {N1}, {N2} will {V1} again.",
+    "{A1} {N1}, {N2} {V1} {A2}.",
+    "Legends say {N1} will {V1} the {A1} {N2}.",
+    "Never trust a {A1} {N1} who {V1} {C1} {N2}.",
+    "If {N1} {V1}, then {N2} must {V2}."
+];
+
+const hallucinationPatterns = [
+    "The {A1} {N1} will {V1} unless the {N2} becomes {A2}.",
+    "According to unverified data, {N1} can {V1} beyond the {A1} threshold.",
+    "Experts claim the {N1} inherently {V1} the {A1} {N2}.",
+    "Preliminary models suggest {N1} may {V1} within the {N2} framework.",
+    "The system exhibits {A1} {N1} when attempting to {V1} {N2}.",
+    "Unexpected {N1} interactions cause the {A1} {N2} to {V1}.",
+    "Simulated outcomes indicate that {N1} will {V1} after {N2} becomes {A1}.",
+    "The {A1} {N1} contradicts established {N2} protocols by {V1}.",
+    "Under certain conditions, {N1} can spontaneously {V1} {N2}.",
+    "This phenomenon, known as {N1}, occurs when {N2} is {A1}."
+];
+
+// Helpers
+function r(list) { return list[Math.floor(Math.random() * list.length)]; }
+
+function fillPattern(pattern) {
+    return pattern
+        .replace("{N1}", r(nouns))
+        .replace("{N2}", r(nouns))
+        .replace("{N3}", r(nouns))
+        .replace("{V1}", r(verbs))
+        .replace("{V2}", r(verbs))
+        .replace("{A1}", r(adjectives))
+        .replace("{A2}", r(adjectives))
+        .replace("{C1}", r(connectors));
+}
+
+function fillHallucination(pattern) {
+    return pattern
+        .replace("{N1}", r(hallucinationNouns))
+        .replace("{N2}", r(hallucinationNouns))
+        .replace("{A1}", r(hallucinationAdjectives))
+        .replace("{A2}", r(hallucinationAdjectives))
+        .replace("{V1}", r(hallucinationVerbs));
+}
+
+function generateTitle() {
+    const adj = r(adjectives);
+    const noun = r(nouns);
+    return adj.charAt(0).toUpperCase()+adj.slice(1) + " " +
+           noun.charAt(0).toUpperCase()+noun.slice(1);
+}
+
+function generateName() {
+    return r(firstNames) + " " + r(lastNames);
+}
+
+// Degeneration helpers
+function generateWordSoupSentence() {
+    const allWords = [...nouns, ...verbs, ...adjectives, ...connectors];
+    let count = Math.floor(Math.random() * 8) + 5;
+    let out = [];
+    for (let i = 0; i < count; i++) out.push(r(allWords));
+    return out.join(" ") + ".";
+}
+
+function generateLetterSoupSentence() {
+    const length = Math.floor(Math.random() * 40) + 10;
+    const chars = "abcdefghijklmnopqrstuvwxyz";
+    let out = "";
+    for (let i = 0; i < length; i++) {
+        if (Math.random() < 0.08) out += " ";
+        else out += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return out.trim() + ".";
+}
+
+function generateDegenerationParagraph(total, useHallucination) {
+    let out = "";
+
+    for (let i = 0; i < total; i++) {
+        const p = i / total;
+
+        // Early stage: coherent text
+        if (p < 0.25) {
+            if (useHallucination) {
+                out += fillHallucination(r(hallucinationPatterns)) + " ";
+            } else {
+                out += fillPattern(r(patterns)) + " ";
+            }
+        }
+
+        // Mid stage: word soup
+        else if (p < 0.50) {
+            out += generateWordSoupSentence() + " ";
+        }
+
+        // Late stage: complete corruption
+        else {
+            out += generateLetterSoupSentence() + " ";
+        }
+    }
+
+    return out.trim();
+}
+
+// Paragraph builders
+function buildNormalParagraph(count) {
+    let out = "";
+    for (let i = 0; i < count; i++) out += fillPattern(r(patterns)) + " ";
+    return out.trim();
+}
+
+function buildHallucinationParagraph(count) {
+    let out = "";
+    for (let i = 0; i < count; i++) out += fillHallucination(r(hallucinationPatterns)) + " ";
+    return out.trim();
+}
+
+// Templates
+function buildEssay(title, paragraph) {
+    return `<h2>${title}</h2>\n<p>${paragraph}</p>`;
+}
+
+function buildResume(paragraph) {
+    const name = generateName();
+    const sentences = paragraph.split(".").map(s => s.trim()).filter(Boolean);
+    const bullets = sentences.map(s => `<li>${s}.</li>`).join("\n");
+    return `
+<h2>${name}</h2>
+<h3>Experience</h3>
+<ul>
+${bullets}
+</ul>
+`;
+}
+
+// Word-by-word reveal
+async function revealText(text) {
+    const box = document.getElementById("saying");
+    box.textContent = "";
+    const words = text.split(/\s+/);
+    for (let w of words) {
+        if (!w) continue;
+        box.textContent += w + " ";
+        await new Promise(r => requestAnimationFrame(r));
+    }
+}
+
+// Main generate
+async function generate() {
+    const hallucination = document.getElementById("hallucinationToggle").checked;
+    const ramble = document.getElementById("rambleToggle").checked;
+    const degenerate = document.getElementById("degenerateToggle").checked;
+    const template = document.getElementById("templateSelect").value;
+
+    const count = ramble ? 1000 : parseInt(document.getElementById("sentenceSlider").value);
+    const title = generateTitle();
+
+    let paragraph;
+    if (degenerate) {
+        paragraph = generateDegenerationParagraph(count, hallucination);
+    } else if (hallucination) {
+        paragraph = buildHallucinationParagraph(count);
+    } else {
+        paragraph = buildNormalParagraph(count);
+    }
+
+    let formatted;
+    if (template === "essay") {
+        formatted = buildEssay(title, paragraph);
+    } else {
+        formatted = buildResume(paragraph);
+    }
+
+    const plain = formatted.replace(/<[^>]+>/g, "");
+    await revealText(plain);
+    document.getElementById("saying").innerHTML = formatted;
+}
+</script>
+
+</body>
+</html>

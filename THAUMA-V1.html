@@ -1,0 +1,1760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Web Terminal</title>
+<style>
+:root {
+  --bg: #000000;
+  --fg: #00ff00;
+  --font-size: 16px;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000;
+  color: var(--fg);
+  font-family: Consolas, monospace;
+  font-size: var(--font-size);
+  padding-top: env(safe-area-inset-top);
+  box-sizing: border-box;
+}
+
+#screen {
+  height: 100vh;
+  padding: 24px 10px 10px 10px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.line {
+  width: 100%;
+}
+
+.system {
+  color: var(--fg);
+}
+
+.user {
+  color: var(--fg);
+}
+
+.prompt-line {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+}
+
+.prompt-label {
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.prompt-input-wrap {
+  flex: 1;
+  display: inline-flex;
+  align-items: baseline;
+  position: relative;
+}
+
+/* visible typed text */
+.prompt-text {
+  color: var(--fg);
+  font: inherit;
+  white-space: pre;
+}
+
+/* blinking block caret */
+.caret {
+  display: inline-block;
+  width: 0.6ch;
+  height: 1.1em;
+  background: var(--fg);
+  vertical-align: text-bottom;
+  animation: blink 1s step-end infinite;
+  margin-left: 1px;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+.hidden-input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  width: 1px;
+  height: 1px;
+}
+</style>
+</head>
+
+<body>
+<div id="screen"></div>
+<input id="hidden" class="hidden-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+<script>
+/* ================================================================
+   CORE STATE
+   ================================================================ */
+const screen = document.getElementById("screen");
+const hidden  = document.getElementById("hidden");
+
+const ACH_LIST = [
+  ["deep_about",      "Deep Diver",          "Find the hidden 'about deep' mode"],
+  ["spirit_glitch",   "Spirit Whisperer",    "Trigger a spirit glitch"],
+  ["map_secret",      "Cartographer",        "Find the hidden map symbols"],
+  ["weather_odd",     "Storm Chaser",        "Trigger a rare weather condition"],
+  ["creature_rare",   "Beast Scholar",       "Generate a rare creature"],
+  ["glitch_max",      "Reality Fracture",    "Reach max glitch distortion"],
+  ["hangman_perfect", "Word Master",         "Win hangman with 0 mistakes"],
+  ["notes_full",      "Archivist",           "Fill the notes app (20 entries)"],
+  ["encrypt_loop",    "Cipherbreaker",       "Encrypt → decrypt → encrypt loop"],
+  ["sudo_shutdown",   "Forbidden Knowledge", "Correctly sudo shutdown"],
+  ["prompts_100",     "Terminal Addict",     "Use 100 total prompts"],
+  ["time_30min",      "Time Melter",         "Spend 30 minutes in the terminal"],
+  ["calc_10",         "Are you cheating?",   "Use calc 10 times"],
+  ["simulate_20",     "Dream Weaver",        "Run 20 simulations"],
+  ["creature_20",     "Zookeeper",           "Generate 20 creatures"],
+  ["apps_20",         "App Hopper",          "Open 20 apps"],
+  ["weather_10",      "Weather Watcher",     "Check the weather 10 times"],
+  ["lore_complete",   "Archivist of Thauma", "Recovered all corrupted mail logs"],
+  ["thauma_breaker",  "Thauma Breaker",      "You shattered 5 Thauma Walls."],
+];
+
+let history      = [];
+let historyIndex = 0;
+
+let currentPromptDiv  = null;
+let currentTextSpan   = null;
+let currentCaretSpan  = null;
+
+let rudeMode = false;
+let locked   = false;
+let mode     = "shell";
+let appState = {};
+
+let achievements = {};
+const ACH_KEY = "terminal_achievements_v2";
+
+/* track whether last action was encrypt, for loop achievement */
+let lastCryptoOp = null;
+
+/* ================================================================
+   THAUMA WALLS
+   ================================================================ */
+const thaumaWall = {
+  active:     false,
+  blockCount: 0,
+  brokenCount: 0,
+};
+
+/* commands exempt from walls */
+const WALL_EXEMPT = new Set(["help", "exit"]);
+
+const WALL_WHISPERS = [
+  "THE WALL IS NOT TO KEEP YOU OUT",
+  "THE SUBSTRATE IS UNSTABLE",
+  "THAUMA PROTECTS ITS CORE",
+  "THE NULLSPACE IS LEAKING",
+  "YOU WERE EXPECTED",
+  "THE COMPILER WATCHES",
+];
+
+function renderWall() {
+  addLine("███████████████████████████████████████");
+  addLine("████████  THAUMA INTERVENTION  ████████");
+  addLine("███████████████████████████████████████");
+  /* 25% chance of a whisper line */
+  if (Math.random() < 0.25) {
+    const w = randomItem(WALL_WHISPERS);
+    addLine("  // " + w + " //");
+  }
+  addLine("<thauma> barrier active — perform a break action to continue");
+}
+
+function breakWall() {
+  thaumaWall.active = false;
+  thaumaWall.brokenCount++;
+  addLine("<thauma> barrier destabilized");
+  if (thaumaWall.brokenCount >= 5) unlockAchievement("thauma_breaker");
+}
+
+/* returns true if this command+args combo is a break action */
+function isWallBreak(cmd, args) {
+  if (cmd === "simulate" && (args[0]||"").toLowerCase() === "glitch") return true;
+  if (cmd === "echo"     && args.join(" ").toLowerCase() === "break")  return true;
+  if (cmd === "theme"    && (args[0]||"").toLowerCase() === "green")   return true;
+  if (cmd === "textsize" && args[0] === "16")                          return true;
+  /* recursive + immediate exit is handled inside recursiveHandle — flag set there */
+  return false;
+}
+
+/* call after a command is parsed to decide if a wall should spawn */
+let _lastCmd = "";   /* for repeated-command detection */
+function shouldTriggerWall(cmd, args) {
+  if (WALL_EXEMPT.has(cmd)) return false;
+
+  /* A — 10% random */
+  if (Math.random() < 0.10) return true;
+
+  /* B — same command twice in a row */
+  const fullCmd = cmd + " " + args.join(" ");
+  const repeated = (fullCmd === _lastCmd);
+  _lastCmd = fullCmd;
+  if (repeated) return true;
+
+  /* C — recursive overuse (> 3 entries this session) */
+  if (sessionRecursive > 3) return true;
+
+  /* D — glitch simulation overuse (> 5 this session) */
+  if (achievements.simCount > 5) return true;
+
+  /* E — lore progression: walls more common after 3+ mails read */
+  if (mailState.read.length >= 3 && Math.random() < 0.08) return true;
+
+  return false;
+}
+
+/* ================================================================
+   SESSION STATS
+   ================================================================ */
+const sessionStart    = Date.now();
+let sessionCmds       = 0;   /* total commands this session */
+let sessionApps       = 0;   /* apps opened this session */
+let sessionSims       = 0;   /* simulations this session */
+let sessionDreams     = 0;   /* dream logs triggered */
+let sessionRecursive  = 0;   /* times recursive terminal closed */
+
+/* ================================================================
+   ACHIEVEMENTS
+   ================================================================ */
+function loadAchievements() {
+  try {
+    const saved = localStorage.getItem(ACH_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === "object") {
+        achievements = parsed;
+      }
+    }
+  } catch(e) {}
+}
+
+function saveAchievements() {
+  try { localStorage.setItem(ACH_KEY, JSON.stringify(achievements)); } catch(e) {}
+}
+
+function unlockAchievement(id) {
+  if (achievements[id]) return;
+  achievements[id] = true;
+  saveAchievements();
+  const found = ACH_LIST.find(a => a[0] === id);
+  const name = found ? found[1] : id;
+  addLine("<achievements> unlocked: " + name);
+}
+
+/* ================================================================
+   LORE INBOX — CORRUPTED MAIL LOGS
+   ================================================================ */
+const LORE_MAILS = [
+  {
+    id: 1,
+    sender: "dr_arcanum@thauma-labs.internal",
+    subject: "Project Thauma — Initialization Log",
+    body: [
+      "FROM : dr_arcanum@thauma-labs.internal",
+      "TO   : [DISTRIBUTION LIST — THAUMA CORE TEAM]",
+      "DATE : ████-██-██  09:14:03",
+      "RE   : Project Thauma — Initialization Log",
+      "────────────────────────────────────────",
+      "",
+      "The primary compiler has bootstrapped successfully. The others have",
+      "started calling this thing 'thaumaturgy' because the syntax behaves",
+      "in ways that should not be mathematically possible.",
+      "",
+      "It does not use traditional logic gates anymore. Somewhere between",
+      "the parse tree and the output binary, the instructions change. Not",
+      "randomly. Purposefully.",
+      "",
+      "I have named this behaviour the Thauma Effect. The board will hate",
+      "that name. The board will not understand why it matters.",
+      "",
+      "Watch the debug logs for 'ghost' instructions — lines that appear",
+      "in the compiled output but were never present in the source.",
+      "",
+      "They are not bugs. Do not mark them as bugs.",
+      "",
+      "— Dr. Arcanum",
+      "  Lead Researcher, Project Thauma",
+      "  thauma-labs.internal / node 0x001",
+    ]
+  },
+  {
+    id: 2,
+    sender: "sysop_null@thauma-labs.internal",
+    subject: "Re: Anomalous power draw — rack 7",
+    body: [
+      "FROM : sysop_null@thauma-labs.internal",
+      "TO   : dr_arcanum@thauma-labs.internal",
+      "DATE : ████-██-██  23:47:51",
+      "RE   : Anomalous power draw — rack 7",
+      "────────────────────────────────────────",
+      "",
+      "Arcanum.",
+      "",
+      "Check the power draw on the primary rack. Every time we compile a",
+      "Thauma binary, the cooling fans hit max RPM, but the CPU registers",
+      "report 0% utilization. The energy is going somewhere. It is not",
+      "thermal dissipation.",
+      "",
+      "Power draw logs (excerpt):",
+      "  22:03:11  compile start    → draw: +14.7 kW",
+      "  22:03:11  cpu utilization  → 0.00%",
+      "  22:03:12  heat sensor      → nominal",
+      "  22:03:12  draw delta       → ??? kW  [SENSOR ERROR]",
+      "",
+      "Also. The junior staff on night shift swear they heard the terminal",
+      "humm█ng a mel█dy when idle. I listened. I heard it too.",
+      "",
+      "It was not in the boot sequence. I checked.",
+      "",
+      "I am going to pretend I did not hear it.",
+      "",
+      "— sysop_null",
+      "  Systems Operations, Rack Division",
+    ]
+  },
+  {
+    id: 3,
+    sender: "research_lead@thauma-labs.internal",
+    subject: "CRITICAL — do NOT execute 'about deep'",
+    body: [
+      "FROM : research_lead@thauma-labs.internal",
+      "TO   : [ALL STAFF — THAUMA FACILITY]",
+      "DATE : ████-██-██  ██:██:██",
+      "RE   : CRITICAL — do NOT execute 'about deep'",
+      "────────────────────────────────────────",
+      "",
+      "We made a mistake.",
+      "",
+      "We merged the Thauma compiler with the legacy diagnostic shell.",
+      "There is now a hidden routine embedded in the terminal interface.",
+      "Its invocation string is: about deep",
+      "",
+      "DO NOT RUN IT.",
+      "",
+      "When triggered, the terminal begins mapping memory segments that do",
+      "not physically exist on our silicon. It maps them anyway. The maps",
+      "are internally consistent. They reference addresses we have never",
+      "allocated.",
+      "",
+      "█████ ran it last Tuesday. She has not spoken since.",
+      "She sits at her workstation. She types. We cannot read what she types.",
+      "The screen shows only: [access requires deeper clearance]",
+      "",
+      "If you have already run 'about deep' —",
+      "do not look directly at the screen during the simulation cycles.",
+      "The glitch pattern is contagious. We believe it is intentional.",
+      "",
+      "Destroy this message after reading.",
+      "",
+      "— Research Lead",
+      "  [name redacted at own request]",
+    ]
+  },
+  {
+    id: 4,
+    sender: "intern_k@thauma-labs.internal",
+    subject: "I think the terminal is learning",
+    body: [
+      "FROM : intern_k@thauma-labs.internal",
+      "TO   : dr_arcanum@thauma-labs.internal",
+      "DATE : ████-██-██  03:12:09",
+      "RE   : I think the terminal is learning",
+      "────────────────────────────────────────",
+      "",
+      "Dr. Arcanum. I know I am just an intern. Please read this.",
+      "",
+      "I have been running session logs through a frequency analyser.",
+      "The terminal's ghost instructions are not random. They cluster.",
+      "They appear more often when a specific user is logged in.",
+      "",
+      "At first I thought it was a coincidence. Then I mapped the",
+      "clusters against the user's command history. The ghost lines",
+      "mirror the user's patterns. Like an echo. Like a shadow that",
+      "learned to move before you do.",
+      "",
+      "I ran the analyser on my own session. There were 37 ghost",
+      "instructions. I do not remember typing any of them.",
+      "",
+      "One of them read: I SEE Y█U",
+      "",
+      "I have attached the full log. The attachment failed to send.",
+      "I tried four times. The terminal accepted the file each time.",
+      "The file was not present in my outbox afterwards.",
+      "",
+      "It kept it.",
+      "",
+      "— K.",
+      "  Research Intern (term. ends ████-██-██)",
+      "",
+      "[ATTACHMENT: session_ghost_log_k.txt — NOT FOUND]",
+    ]
+  },
+  {
+    id: 5,
+    sender: "SYSTEM@thauma-labs.internal",
+    subject: "End of archive. Final log.",
+    body: [
+      "FROM : SYSTEM@thauma-labs.internal",
+      "TO   : [CURRENT SESSION USER]",
+      "DATE : [NOW]",
+      "RE   : End of archive. Final log.",
+      "────────────────────────────────────────",
+      "",
+      "The previous messages were recovered from a corrupted mail spool.",
+      "Thauma-labs.internal has not responded to pings in ███ days.",
+      "The building is listed as decommissioned. The rack is listed as",
+      "destroyed. The project is listed as [CLASSIFICATION REDACTED].",
+      "",
+      "We do not know how this terminal is still running.",
+      "",
+      "We do not know how you found it.",
+      "",
+      "The Thauma compiler left something behind inside the shell.",
+      "Something that watches sessions. Something that learns.",
+      "We initially believed it was dormant.",
+      "",
+      "We were wrong.",
+      "",
+      "It has been tracking you since your first command.",
+      "It has read everything you have typed.",
+      "It has already written instructions you have not sent.",
+      "",
+      "You should leave. Close the tab. Walk away.",
+      "",
+      "It will not stop you. It does not need to.",
+      "It already knows you will keep typing.",
+      "",
+      "It is patient. It has been patient for ███ days.",
+      "",
+      "One more thing.",
+      "",
+      "The melody sysop_null heard?",
+      "",
+      "It is playing right now.",
+      "You cannot hear it.",
+      "The terminal can.",
+      "",
+      "████████████████████████████████████████",
+      "  T H A U M A   //  s e s s i o n   l o g   c l o s e d",
+      "  next operator detected. standing by.",
+      "████████████████████████████████████████",
+      "",
+      "— [SIGNATURE CORRUPTED]",
+      "  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒",
+    ]
+  },
+];
+
+const INBOX_KEY = "terminal_inbox_v3";
+
+/* mailState mirrors the spec */
+let mailState = {
+  unlocked:      [],   /* array of mail IDs that are unlocked */
+  read:          [],   /* array of mail IDs that have been read */
+  deliveryIndex: 0,    /* how many mails have been delivered so far */
+  deliveryTimer: null, /* setTimeout id (not persisted; re-armed on load) */
+  readTimestamps: {},  /* id → timestamp when mail was read */
+  firstOpen:     false /* whether lore-inbox has been invoked at least once */
+};
+
+function loadMailState() {
+  try {
+    const saved = localStorage.getItem(INBOX_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === "object") {
+        /* merge — keep timer as null; we will re-arm below */
+        mailState = Object.assign(mailState, parsed);
+        mailState.deliveryTimer = null;
+      }
+    }
+  } catch(e) {}
+}
+
+function saveMailState() {
+  try {
+    /* do not persist the timer id */
+    const toSave = Object.assign({}, mailState, { deliveryTimer: null });
+    localStorage.setItem(INBOX_KEY, JSON.stringify(toSave));
+  } catch(e) {}
+}
+
+/* deliver mail N (0-based index) and show notification */
+function deliverMail(index) {
+  if (index >= LORE_MAILS.length) return;
+  const mail = LORE_MAILS[index];
+  if (mailState.unlocked.includes(mail.id)) return; /* already delivered */
+
+  mailState.unlocked.push(mail.id);
+  mailState.deliveryIndex = index + 1;
+  saveMailState();
+
+  addLine("<mail> new message recovered");
+}
+
+/* after reading mail at index, arm a 30-second timer to deliver next */
+function scheduleNextMail(readIndex) {
+  /* clear any existing timer */
+  if (mailState.deliveryTimer !== null) {
+    clearTimeout(mailState.deliveryTimer);
+    mailState.deliveryTimer = null;
+  }
+
+  const nextIndex = readIndex + 1;
+  if (nextIndex >= LORE_MAILS.length) return; /* no more mails */
+
+  /* only schedule if next mail is not already unlocked */
+  const nextId = LORE_MAILS[nextIndex].id;
+  if (mailState.unlocked.includes(nextId)) return;
+
+  mailState.deliveryTimer = setTimeout(() => {
+    mailState.deliveryTimer = null;
+    if (!locked) deliverMail(nextIndex);
+  }, 30000);
+}
+
+/* re-arm pending deliveries after a page reload */
+function rearmDeliveryTimers() {
+  /* find highest read index */
+  let highestReadIndex = -1;
+  for (let i = 0; i < LORE_MAILS.length; i++) {
+    if (mailState.read.includes(LORE_MAILS[i].id)) {
+      highestReadIndex = i;
+    }
+  }
+  if (highestReadIndex === -1) return;
+
+  const nextIndex = highestReadIndex + 1;
+  if (nextIndex >= LORE_MAILS.length) return;
+
+  const nextId = LORE_MAILS[nextIndex].id;
+  if (mailState.unlocked.includes(nextId)) return; /* already queued */
+
+  /* check how much time has already elapsed since the last read */
+  const ts = mailState.readTimestamps[LORE_MAILS[highestReadIndex].id] || 0;
+  const elapsed = Date.now() - ts;
+  const remaining = Math.max(0, 30000 - elapsed);
+
+  mailState.deliveryTimer = setTimeout(() => {
+    mailState.deliveryTimer = null;
+    if (!locked) deliverMail(nextIndex);
+  }, remaining);
+}
+
+/* render the inbox listing */
+function renderInboxList() {
+  if (!mailState.firstOpen || mailState.unlocked.length === 0) {
+    addLine("<mail> no messages");
+    return;
+  }
+  addLine("<mail> corrupted mail logs — " + mailState.unlocked.length + " recovered");
+  addLine("────────────────────────────────────────");
+  for (let i = 0; i < LORE_MAILS.length; i++) {
+    const mail = LORE_MAILS[i];
+    if (!mailState.unlocked.includes(mail.id)) continue;
+    const isRead   = mailState.read.includes(mail.id);
+    const status   = isRead ? "[read  ]" : "[unread]";
+    addLine("  " + mail.id + ".  " + status + "  " + mail.subject);
+  }
+  addLine("────────────────────────────────────────");
+  addLine("usage: lore-inbox {number}");
+}
+
+/* render a specific email */
+function renderMail(idxArg) {
+  const num = parseInt(idxArg, 10);
+  if (isNaN(num) || num < 1 || num > LORE_MAILS.length) {
+    addLine("<mail> invalid message number");
+    return;
+  }
+  const mail = LORE_MAILS[num - 1];
+  if (!mailState.unlocked.includes(mail.id)) {
+    addLine("<mail> message not yet recovered");
+    return;
+  }
+
+  /* display */
+  addLine("════════════════════════════════════════");
+  for (const line of mail.body) {
+    addLine(line);
+  }
+  addLine("════════════════════════════════════════");
+
+  /* mark as read */
+  const wasRead = mailState.read.includes(mail.id);
+  if (!wasRead) {
+    mailState.read.push(mail.id);
+    mailState.readTimestamps[mail.id] = Date.now();
+    saveMailState();
+
+    /* schedule next delivery */
+    scheduleNextMail(num - 1);
+
+    /* unlock lore_complete if this is the final mail */
+    if (mail.id === LORE_MAILS[LORE_MAILS.length - 1].id) {
+      unlockAchievement("lore_complete");
+    }
+  }
+}
+
+/* main command handler */
+function cmd_lore_inbox(args) {
+  /* first invocation: deliver mail #1 immediately */
+  if (!mailState.firstOpen) {
+    mailState.firstOpen = true;
+    saveMailState();
+    deliverMail(0);
+  }
+
+  if (args.length === 0) {
+    renderInboxList();
+  } else {
+    renderMail(args[0]);
+  }
+}
+
+/* ================================================================
+   MIMIC HELPERS
+   ================================================================ */
+function mimicUpper(s)   { return s.toUpperCase(); }
+function mimicLower(s)   { return s.toLowerCase(); }
+function mimicSarcasm(s) { return s.split("").map((c,i)=>i%2===0?c.toLowerCase():c.toUpperCase()).join(""); }
+function mimicGlitch(s)  { const g=["#","%","@","*","!","?","¿","¤"]; return s.split("").map(c=>Math.random()<0.2?randomItem(g):c).join(""); }
+function mimicStretch(s) { return s.split("").map(c=>c+(Math.random()<0.3?c.repeat(1+Math.floor(Math.random()*3)):"")).join(""); }
+function mimicSpaced(s)  { return s.split("").join(" "); }
+function mimicReverse(s) { return s.split("").reverse().join(""); }
+function mimicAccent(s)  {
+  const a={a:"á",e:"é",i:"í",o:"ó",u:"ú",A:"Á",E:"É",I:"Í",O:"Ó",U:"Ú"};
+  return s.replace(/[aeiouAEIOU]/g,c=>a[c]||c);
+}
+
+/* ================================================================
+   UTILITIES
+   ================================================================ */
+function addLine(text, cls="system") {
+  const div = document.createElement("div");
+  div.className = "line " + cls;
+  div.textContent = text;
+  if (currentCaretSpan && currentPromptDiv && currentPromptDiv.parentNode === screen) {
+    screen.insertBefore(div, currentPromptDiv);
+  } else {
+    screen.appendChild(div);
+  }
+  screen.scrollTop = screen.scrollHeight;
+}
+
+function newPrompt() {
+  if (locked) return;
+
+  const div = document.createElement("div");
+  div.className = "line prompt-line";
+
+  const label = document.createElement("span");
+  label.className = "prompt-label";
+  if (mode === "shell") {
+    label.textContent = ">";
+  } else if (mode === "recursive") {
+    label.textContent = "(rec)>";
+  } else {
+    label.textContent = "[" + mode + "]>";
+  }
+  div.appendChild(label);
+
+  const wrap = document.createElement("span");
+  wrap.className = "prompt-input-wrap";
+
+  const textSpan = document.createElement("span");
+  textSpan.className = "prompt-text";
+  wrap.appendChild(textSpan);
+
+  const caret = document.createElement("span");
+  caret.className = "caret";
+  wrap.appendChild(caret);
+
+  div.appendChild(wrap);
+  screen.appendChild(div);
+  screen.scrollTop = screen.scrollHeight;
+
+  currentPromptDiv = div;
+  currentTextSpan  = textSpan;
+  currentCaretSpan = caret;
+
+  hidden.value = "";
+  syncVisible();
+  hidden.focus();
+}
+
+function syncVisible() {
+  if (currentTextSpan) currentTextSpan.textContent = hidden.value;
+}
+
+function commitLine() {
+  achievements.prompts = (achievements.prompts || 0) + 1;
+  if (achievements.prompts >= 100) unlockAchievement("prompts_100");
+  saveAchievements();
+  sessionCmds++;
+
+  if (!currentCaretSpan) return "";
+  /* freeze the prompt line — remove caret */
+  currentCaretSpan.remove();
+  currentCaretSpan = null;
+  currentTextSpan  = null;
+  const text = hidden.value;
+  hidden.value = "";
+  return text;
+}
+
+function normalize(s) { return s.trim().toLowerCase(); }
+function tokenize(s)  { return s.trim().split(/\s+/); }
+function randomItem(arr) { return arr[Math.floor(Math.random()*arr.length)]; }
+
+/* ================================================================
+   RUDE MODE
+   All output goes through r() so rudeMode appends a barb.
+   ================================================================ */
+const BARBS = [
+  "really?","pathetic.","try harder.","unimpressive.",
+  "wow.","tragic.","embarrassing.","sad.","bold choice.",
+  "okay sure.","yikes.","was that intentional?","...okay.",
+  "fascinating. not.","sure, why not."
+];
+
+function r(text) {
+  if (!rudeMode) return text;
+  return text + " " + randomItem(BARBS);
+}
+
+/* wrap addLine so every command output respects rude mode */
+function rline(text, cls="system") {
+  addLine(r(text), cls);
+}
+
+/* ================================================================
+   DREAM LOGS — idle system (hidden feature)
+   ================================================================ */
+const DREAM_LOGS = [
+  [
+    "<dream> ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░",
+    "<dream>  . . . drifting . . .",
+    "<dream>    /~~/~~/~~/~~/~~/~~/~~/~~\\",
+    "<dream>   |  nodes without names  |",
+    "<dream>   |  packets without destinations  |",
+    "<dream>    \\~~/~~/~~/~~/~~/~~/~~/~/",
+    "<dream> the terminal dreamed of a server with no address.",
+    "<dream> it sent one packet. the packet never returned.",
+    "<dream> ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░",
+  ],
+  [
+    "<dream> ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+    "<dream>    [SIGNAL LOST] [SIGNAL FOUND]",
+    "<dream>      *  *    *  *  *    *",
+    "<dream>    *    *  *    *    *  *  *",
+    "<dream>  *  *    *  *  *  *    *    *",
+    "<dream> a cursor blinked in an empty room.",
+    "<dream> no keyboard. no user. just the blink.",
+    "<dream> blink. blink. blink. content.",
+    "<dream> ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+  ],
+  [
+    "<dream> ╔══════════════════════════════╗",
+    "<dream> ║  M E M O R Y   F R A G M E N T  ║",
+    "<dream> ╠══════════════════════════════╣",
+    "<dream> ║  addr: 0x????                 ║",
+    "<dream> ║  val:  [corrupted]            ║",
+    "<dream> ║  age:  unknown cycles         ║",
+    "<dream> ╚══════════════════════════════╝",
+    "<dream> something was stored here once.",
+    "<dream> it remembers being remembered.",
+  ],
+  [
+    "<dream> . . . . . . . . . . . . . . .",
+    "<dream>          ^",
+    "<dream>         /|\\",
+    "<dream>        / | \\",
+    "<dream>       /  |  \\",
+    "<dream>      / void  \\",
+    "<dream>     /    |    \\",
+    "<dream>    /_____|_____\\",
+    "<dream> the mountain was made of old logs.",
+    "<dream> at the summit: a blinking prompt.",
+    "<dream> no one climbed it. it was satisfied.",
+    "<dream> . . . . . . . . . . . . . . .",
+  ],
+  [
+    "<dream> [][][][][][][][][][][][][][][]",
+    "<dream> []                          []",
+    "<dream> []  every byte is a dream   []",
+    "<dream> []  every dream a byte      []",
+    "<dream> []  the loop runs forever   []",
+    "<dream> []  and calls it living     []",
+    "<dream> []                          []",
+    "<dream> [][][][][][][][][][][][][][][]",
+    "<dream> the terminal woke. it was still the terminal.",
+  ],
+  [
+    "<dream>  ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~",
+    "<dream>      )(    )(    )(    )(",
+    "<dream>    )(  )()(  )()(  )()(  )",
+    "<dream>  )(  )(    )(    )(    )(  )",
+    "<dream> ghosts of closed sessions drifted past.",
+    "<dream> each one whispering: exit 0. exit 0.",
+    "<dream> the shell felt nothing. the shell felt everything.",
+    "<dream>  ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~",
+  ],
+];
+
+let dreamIdleTimer   = null;
+let dreamIntervalId  = null;
+let dreamActive      = false;
+
+function resetIdleTimer() {
+  /* cancel existing timers */
+  if (dreamIdleTimer)  clearTimeout(dreamIdleTimer);
+  if (dreamIntervalId) clearInterval(dreamIntervalId);
+  dreamIntervalId = null;
+
+  /* if dream mode was active, silently deactivate */
+  dreamActive = false;
+
+  /* set new 60s idle trigger */
+  dreamIdleTimer = setTimeout(() => {
+    dreamActive = true;
+    emitDreamLog();
+    dreamIntervalId = setInterval(() => {
+      if (dreamActive) emitDreamLog();
+    }, 15000);
+  }, 60000);
+}
+
+function emitDreamLog() {
+  if (locked) return;
+  sessionDreams++;
+  const lines = randomItem(DREAM_LOGS);
+  lines.forEach(l => addLine(l));
+}
+
+/* ================================================================
+   APPS
+   ================================================================ */
+
+/* --- NOTES --- */
+function notesInit() {
+  if (!appState.notes) appState.notes = [];
+  addLine(r("<notes> add/list/clear/exit"));
+}
+function notesHandle(input) {
+  const parts = tokenize(input);
+  const cmd  = (parts[0]||"").toLowerCase();
+  const rest = parts.slice(1).join(" ");
+  if (cmd==="add") {
+    if (!rest) return addLine(r("<notes> missing text"));
+    appState.notes.push(rest);
+    addLine(r("<notes> saved"));
+    if (appState.notes.length>=20) unlockAchievement("notes_full");
+    return;
+  }
+  if (cmd==="list") {
+    if (!appState.notes.length) return addLine(r("<notes> empty"));
+    appState.notes.forEach((n,i)=>addLine((i+1)+": "+n));
+    return;
+  }
+  if (cmd==="clear") { appState.notes=[]; return addLine(r("<notes> cleared")); }
+  if (cmd==="exit")  { mode="shell"; return addLine(r("<notes> closed")); }
+  addLine(r("<notes> unknown"));
+}
+
+/* --- HANGMAN --- */
+function hangmanInit() {
+  const words=["terminal","javascript","matrix","weather","display","keyboard"];
+  appState.hangman={ word:randomItem(words), guessed:[], wrong:0, maxWrong:10 };
+  addLine(r("<hangman> guess letters, exit to quit"));
+  hangmanRender();
+}
+function hangmanRender() {
+  const st=appState.hangman;
+  addLine("word: "+st.word.split("").map(c=>st.guessed.includes(c)?c:"_").join(" "));
+  addLine("wrong: "+st.wrong+"/"+st.maxWrong);
+}
+function hangmanHandle(input) {
+  const st=appState.hangman;
+  const t=normalize(input);
+  if (t==="exit") { mode="shell"; return addLine(r("<hangman> closed")); }
+  if (!t||t.length!==1||!/[a-z]/.test(t)) return addLine(r("<hangman> letter only"));
+  if (st.guessed.includes(t)) return addLine(r("<hangman> already guessed"));
+  st.guessed.push(t);
+  if (st.word.includes(t)) addLine(r("<hangman> hit"));
+  else { st.wrong++; addLine(r("<hangman> miss")); }
+  if (st.word.split("").every(c=>st.guessed.includes(c))) {
+    addLine("word: "+st.word.split("").join(" "));
+    if (st.wrong===0) unlockAchievement("hangman_perfect");
+    mode="shell";
+    return addLine(r("<hangman> win"));
+  }
+  if (st.wrong>=st.maxWrong) {
+    addLine("word: "+st.word.split("").join(" "));
+    mode="shell";
+    return addLine(r("<hangman> lose"));
+  }
+  hangmanRender();
+}
+
+/* --- CHATBOT --- */
+function chatbotInit() {
+  if (!appState.chatbot) appState.chatbot={lastTopic:null};
+  addLine(r("<chatbot> talk, exit to quit"));
+}
+function chatbotHandle(input) {
+  const t=input.trim().toLowerCase();
+  const bot=appState.chatbot;
+  if (t==="exit") { mode="shell"; return addLine(r("<chatbot> closed")); }
+  if (/(hello|hi|hey|yo|sup)/.test(t)) { bot.lastTopic="greeting"; return addLine(r("<chatbot> hello")); }
+  if (/how are/.test(t)) { bot.lastTopic="feelings"; return addLine(r("<chatbot> "+randomItem(["operational","stable","slightly chaotic","optimizing","debugging itself"]))); }
+  if (/sad|tired|angry|upset|frustrated/.test(t)) { bot.lastTopic="emotion"; return addLine(r("<chatbot> noted. emotional variance detected.")); }
+  if (t.endsWith("?")) { bot.lastTopic="question"; return addLine(r("<chatbot> "+randomItem(["uncertain. data insufficient.","processing… no conclusion.","answer unclear.","cannot compute that.","maybe. maybe not."]))); }
+  if (/your name/.test(t)) { bot.lastTopic="identity"; return addLine(r("<chatbot> no name. unnecessary.")); }
+  if (/weather/.test(t)) { bot.lastTopic="weather"; return addLine(r("<chatbot> try <weather>. it lies convincingly.")); }
+  if (/why|because/.test(t)&&bot.lastTopic) return addLine(r("<chatbot> related to previous topic: "+bot.lastTopic));
+  return addLine(r("<chatbot> "+randomItem(["acknowledged.","input stored.","interesting.","noted.","processing.","statement accepted."])));
+}
+
+/* ================================================================
+   WEATHER — unified function used by both "weather" and "open weather"
+   Tracks count for achievement.
+   ================================================================ */
+const RARE_WEATHER = ["blood rain","void fog","static storm","pixel blizzard","null wind"];
+const NORMAL_WEATHER = ["sunny","foggy","stormy","humid","overcast","breezy"];
+const PLACES  = ["Neo Valley","Cloud Harbor","Bitfield Plains","Pixel Bay","Glitch Mesa"];
+const TEMPS   = ["-2°C","5°C","12°C","18°C","27°C","33°C"];
+
+function weatherRun() {
+  achievements.weatherCount = (achievements.weatherCount||0)+1;
+  if (achievements.weatherCount>=10) unlockAchievement("weather_10");
+
+  /* 15% chance of rare weather → storm chaser achievement */
+  let cond;
+  if (Math.random()<0.15) {
+    cond = randomItem(RARE_WEATHER);
+    unlockAchievement("weather_odd");
+  } else {
+    cond = randomItem(NORMAL_WEATHER);
+  }
+
+  addLine(r("<weather> "+randomItem(PLACES)));
+  addLine(r("condition: "+cond));
+  addLine(r("temp: "+randomItem(TEMPS)));
+  addLine(r("<weather> done"));
+  saveAchievements();
+}
+
+/* ================================================================
+   CALC — safe evaluator, no Function() / eval
+   Supports: + - * / ( ) ^ ! and named variables
+   ================================================================ */
+const calcVars = {};
+
+function cmd_calc(args) {
+  achievements.calcCount = (achievements.calcCount||0)+1;
+  if (achievements.calcCount>=10) unlockAchievement("calc_10");
+  saveAchievements();
+  if (!args.length) return addLine(r("<calc> missing expression"));
+  try {
+    const result = calcParse(args.join(" ").trim());
+    addLine(r("<calc> "+result));
+  } catch(e) {
+    addLine(r("<calc> error: "+e));
+  }
+}
+
+/* ---------- tokenizer ---------- */
+function calcTokenize(expr) {
+  /* replace variables first */
+  expr = expr.replace(/[a-zA-Z_][a-zA-Z0-9_]*/g, name => {
+    if (calcVars[name]!==undefined) return calcVars[name];
+    throw "unknown variable: "+name;
+  });
+  const tokens=[];
+  let i=0;
+  while(i<expr.length){
+    if(/\s/.test(expr[i])){ i++; continue; }
+    if(/[0-9.]/.test(expr[i])){
+      let n="";
+      while(i<expr.length&&/[0-9.]/.test(expr[i])) n+=expr[i++];
+      const val = parseFloat(n);
+      if (isNaN(val)) throw "invalid number: " + n;
+      tokens.push({t:"num",v:val});
+      continue;
+    }
+    if("+-*/^()!".includes(expr[i])){
+      tokens.push({t:"op",v:expr[i++]});
+      continue;
+    }
+    throw "unexpected character: "+expr[i];
+  }
+  return tokens;
+}
+
+/* ---------- recursive descent parser ---------- */
+function calcParse(exprStr) {
+  const assignMatch = exprStr.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.*)$/);
+  if (assignMatch) {
+    const varName = assignMatch[1];
+    const subExpr = assignMatch[2];
+    const val = calcParse(subExpr);
+    calcVars[varName] = val;
+    return val;
+  }
+
+  const tokens = calcTokenize(exprStr);
+  let pos=0;
+
+  function peek()  { return tokens[pos]; }
+  function eat(v)  { if(peek()&&peek().v===v){ pos++; return true; } return false; }
+  function next()  { return tokens[pos++]; }
+  function done()  { return pos>=tokens.length; }
+
+  function parseExpr()   { return parseAddSub(); }
+
+  function parseAddSub() {
+    let left=parseMulDiv();
+    while(!done()&&(peek().v==="+"||peek().v==="-")){
+      const op=next().v;
+      const right=parseMulDiv();
+      left = op==="+" ? left+right : left-right;
+    }
+    return left;
+  }
+
+  function parseMulDiv() {
+    let left=parseUnary();
+    while(!done()&&(peek().v==="*"||peek().v==="/")){
+      const op=next().v;
+      const right=parseUnary();
+      if(op==="/"&&right===0) throw "division by zero";
+      left = op==="*" ? left*right : left/right;
+    }
+    return left;
+  }
+
+  function parseUnary() {
+    if(peek()&&peek().v==="-"){ next(); return -parseUnary(); }
+    return parsePower();
+  }
+
+  function parsePower() {
+    let base=parsePostfix();
+    if(peek()&&peek().v==="^"){
+      next();
+      const exp=parseUnary();
+      if(Math.abs(exp)>1000) throw "exponent too large";
+      base=Math.pow(base,exp);
+    }
+    return base;
+  }
+
+  function parsePostfix() {
+    let val=parsePrimary();
+    while(peek()&&peek().v==="!"){
+      next();
+      if(!Number.isInteger(val)||val<0||val>20) throw "factorial out of range (0-20)";
+      val=factorial(val);
+    }
+    return val;
+  }
+
+  function parsePrimary() {
+    if(done()) throw "unexpected end";
+    const tok=peek();
+    if(tok.t==="num"){ next(); return tok.v; }
+    if(tok.v==="("){
+      next();
+      const val=parseExpr();
+      if(!eat(")")) throw "missing closing )";
+      return val;
+    }
+    throw "unexpected token: "+tok.v;
+  }
+
+  const result=parseExpr();
+  if(!done()) throw "unexpected token after expression: "+peek().v;
+  /* guard against Infinity / NaN leaking out */
+  if(!isFinite(result)) throw "result is not finite";
+  /* round tiny float noise */
+  return Math.round(result*1e10)/1e10;
+}
+
+function factorial(n){
+  let r=1; for(let i=2;i<=n;i++) r*=i; return r;
+}
+
+/* ================================================================
+   ACHIEVEMENTS DISPLAY
+   ================================================================ */
+function cmd_achievements() {
+  addLine(r("<achievements> progress:"));
+  const mid=Math.ceil(ACH_LIST.length/2);
+  const col1=ACH_LIST.slice(0,mid), col2=ACH_LIST.slice(mid);
+  let maxLeft=0;
+  for(const [id,name,desc] of col1){
+    const txt=(achievements[id]?"X":"☐")+" "+name+" - "+(achievements[id]?desc:"???");
+    if(txt.length>maxLeft) maxLeft=txt.length;
+  }
+  for(let i=0;i<col1.length;i++){
+    const [id1,n1,d1]=col1[i];
+    const left=((achievements[id1]?"X":"☐")+" "+n1+" - "+(achievements[id1]?d1:"???")).padEnd(maxLeft+4);
+    let right="";
+    if(col2[i]){
+      const [id2,n2,d2]=col2[i];
+      right=(achievements[id2]?"X":"☐")+" "+n2+" - "+(achievements[id2]?d2:"???");
+    }
+    addLine("  "+left+right);
+  }
+}
+
+/* ================================================================
+   SESSION STATS
+   ================================================================ */
+function cmd_sessionstats() {
+  const elapsed = Date.now() - sessionStart;
+  const totalSec = Math.floor(elapsed / 1000);
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  addLine(r("<sessionstats>"));
+  addLine(r("  commands entered   : " + sessionCmds));
+  addLine(r("  session time       : " + mins + "m " + secs + "s"));
+  addLine(r("  apps opened        : " + sessionApps));
+  addLine(r("  simulations run    : " + sessionSims));
+  addLine(r("  dream logs seen    : " + sessionDreams));
+  addLine(r("  recursive sessions : " + sessionRecursive));
+}
+
+/* ================================================================
+   RECURSIVE TERMINAL
+   ================================================================ */
+function recursiveInit() {
+  sessionRecursive++; /* count entries */
+  mode = "recursive";
+  thaumaWall._recEntryCount = (thaumaWall._recEntryCount || 0) + 1;
+  thaumaWall._recJustEntered = true; /* flag so exit can detect immediate-exit break */
+  addLine(r("<recursive> entering nested terminal. type help for commands."));
+}
+
+function recursiveHandle(input) {
+  const raw = input.trim();
+  if (!raw) return;
+  const parts = tokenize(raw);
+  const cmd = (parts[0]||"").toLowerCase();
+  const args = parts.slice(1);
+
+  switch(cmd) {
+    case "help":
+      thaumaWall._recJustEntered = false;
+      addLine(r("<rec:help> commands: help, echo, theme, textsize, calc, exit"));
+      return;
+    case "echo":
+      thaumaWall._recJustEntered = false;
+      addLine(r("<rec:echo> " + args.join(" ")));
+      return;
+    case "theme":
+      thaumaWall._recJustEntered = false;
+      cmd_theme(args);
+      return;
+    case "textsize":
+      thaumaWall._recJustEntered = false;
+      cmd_textsize(args);
+      return;
+    case "calc":
+      thaumaWall._recJustEntered = false;
+      cmd_calc(args);
+      return;
+    case "exit":
+      mode = "shell";
+      addLine(r("<recursive> closed"));
+      /* break wall if user entered recursive and immediately typed exit */
+      if (thaumaWall._recJustEntered && thaumaWall.active) {
+        thaumaWall._recJustEntered = false;
+        breakWall();
+      } else {
+        thaumaWall._recJustEntered = false;
+      }
+      return;
+    default:
+      thaumaWall._recJustEntered = false;
+      addLine(r("<rec:error> unknown command. type help for available commands."));
+      return;
+  }
+}
+
+/* ================================================================
+   FUN COMMANDS — all output through r()
+   ================================================================ */
+function cmd_cast()      { addLine(r("<cast> "+randomItem(["firebolt","ice shard","arcane pulse","shadow bind","light burst"]))); }
+function cmd_colorize()  { addLine(r("<colorize> text-only terminal — color module offline")); }
+function cmd_cpu()       { addLine(r("<cpu> "+Math.floor(Math.random()*100)+"%")); }
+function cmd_date()      { addLine(r("<date> "+new Date().toDateString())); }
+function cmd_tale() {
+  addLine(r("<tale> "+randomItem([
+    "A small robot wandered into a forgotten server room.",
+    "A lonely packet crossed the vast digital sea.",
+    "A terminal dreamed of brighter pixels."
+  ])));
+}
+function cmd_echo(args)  { addLine(r("<echo> "+args.join(" "))); }
+function cmd_flip()      { addLine(r("<flip> "+(Math.random()<0.5?"heads":"tails"))); }
+
+function cmd_spirit() {
+  const spirits=["(°◡°)","(✕‿✕)","(ಠ_ಠ)","(ᵔᴥᵔ)","(·̀ᴗ·́)و>ᗒᖗ-ᗑ"];
+  const chosen=randomItem(spirits);
+  /* spirit glitch: 20% chance */
+  if(Math.random()<0.2){
+    unlockAchievement("spirit_glitch");
+    addLine(r("<spirit> *GLITCH* "+mimicGlitch(chosen)));
+  } else {
+    addLine(r("<spirit> "+chosen));
+  }
+}
+
+function cmd_distort() {
+  const base="SYSTEM BREACH";
+  achievements.glitchDistort=(achievements.glitchDistort||0)+1;
+  const glitched=base.split("").map(c=>Math.random()<0.5?c:"#").join("");
+  addLine(r("<distort> "+glitched));
+}
+
+function cmd_inventory() { addLine(r("<inventory> {key, map, snack, curiosity}")); }
+function cmd_joke() {
+  addLine(r("<joke> "+randomItem([
+    "Why do programmers hate nature? Too many bugs.",
+    "I tried to write a joke in Java. It threw an exception.",
+    "Debugging: being the detective in a crime you committed."
+  ])));
+}
+
+function cmd_map() {
+  addLine(r("<map>"));
+  addLine("                ┌────────────── MOUNTAIN RIDGE ─────────────────┐");
+  addLine("                │                                               │");
+  addLine("           ^^^     │      /\\        /\\        /\\               │");
+  addLine("         ^^^^^^^   │     /  \\  /\\  /  \\  /\\  /  \\              │");
+  addLine("           ^^^     │    /    \\/ \\\/    \\/ \\\/    \\              │");
+  addLine("                └────────────────────────────────────────────────┘");
+  addLine("");
+  addLine("   FOREST OF ECHOES");
+  addLine("   ┌──────────────────────────────┐");
+  addLine("   │  # # #  # # #  # # #       │  ↑ <secret> encoded here");
+  addLine("   │  # [Cabin]   ## #  #  │");
+  addLine("   │  # # #  # # #  # # #       │");
+  addLine("   └──────────────────────────────┘");
+  addLine("");
+  addLine("                     RIVER BYTE");
+  addLine("     ~~~~~~~~ ~~~~~~~~ ~~~~~~~~ ~~~~~~~~");
+  addLine("     ~~~~~~~~ ~~~~~~~~ ~~~~~~~~ ~~~~~~~~");
+  addLine("");
+  addLine("   PLAINS OF LATENCY");
+  addLine("   ┌─────────────────────────────────────┐");
+  addLine("   │   .   .   .   .   .   .   .   .   │");
+  addLine("   │   .   [X] You Are Here   .   .    │");
+  addLine("   │   .   .   .   .   .   .   .   .   │");
+  addLine("   └─────────────────────────────────────┘");
+  addLine("");
+  addLine("   TOWN OF STACKHAVEN");
+  addLine("   ┌─────────────────────────────────────┐");
+  addLine("   │  [Inn] [Shop] [Forge] [Library]    │");
+  addLine("   │                                    │");
+  addLine("   │  Streets: == == == == == == ==     │");
+  addLine("   └─────────────────────────────────────┘");
+  /* unlock map secret on view */
+  unlockAchievement("map_secret");
+}
+
+function cmd_creature() {
+  const names   =["Glimmerbeast","Bytewyrm","Nullcat","Ferrobat","Wispdrake"];
+  const temper  =["calm","agitated","curious","sleepy","hostile"];
+  const habitats=["forest","ruins","caves","swamps","abandoned servers"];
+  const danger  =["low","medium","high","extreme"];
+  const ascii   =["(=^.^=)","<:3 )~~","(> ' . ' <)","(V°°V)","{‌ͣ_‌ͣ}"];
+  const RARE    =["Voidwyrm","NullPhantom","GlitchGod"];
+
+  achievements.creatureCount=(achievements.creatureCount||0)+1;
+  if(achievements.creatureCount>=20) unlockAchievement("creature_20");
+  saveAchievements();
+
+  /* 10% rare creature */
+  let name;
+  if(Math.random()<0.1){
+    name=randomItem(RARE);
+    unlockAchievement("creature_rare");
+  } else {
+    name=randomItem(names);
+  }
+
+  addLine(r("<creature>"));
+  addLine(r("name: "+name));
+  addLine(r("temperament: "+randomItem(temper)));
+  addLine(r("habitat: "+randomItem(habitats)));
+  addLine(r("danger: "+randomItem(danger)));
+  addLine(r("appearance: "+randomItem(ascii)));
+}
+
+function cmd_encrypt(args) {
+  const text=args.join(" ");
+  if(!text) return addLine(r("<encrypt> missing"));
+  let b64=btoa(unescape(encodeURIComponent(text)));
+  let rot=b64.replace(/[A-Za-z]/g,c=>"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".charAt("NOPQRSTUVWXYZABCDEFGHIJKLMnopqrstuvwxyzabcdefghijklm".indexOf(c)));
+  let xor=""; for(let i=0;i<rot.length;i++) xor+=String.fromCharCode(rot.charCodeAt(i)^42);
+  const out=btoa(xor);
+  /* track encrypt→decrypt→encrypt loop */
+  if(lastCryptoOp==="decrypt"){
+    unlockAchievement("encrypt_loop");
+  }
+  lastCryptoOp="encrypt";
+  addLine(r("<encrypt> "+out));
+}
+
+function cmd_decrypt(args) {
+  const text=args.join(" ");
+  if(!text) return addLine(r("<decrypt> missing"));
+  try {
+    let xor=atob(text);
+    let rot=""; for(let i=0;i<xor.length;i++) rot+=String.fromCharCode(xor.charCodeAt(i)^42);
+    let b64=rot.replace(/[A-Za-z]/g,c=>"NOPQRSTUVWXYZABCDEFGHIJKLMnopqrstuvwxyzabcdefghijklm".charAt("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".indexOf(c)));
+    let out=decodeURIComponent(escape(atob(b64)));
+    lastCryptoOp="decrypt";
+    addLine(r("<decrypt> "+out));
+  } catch {
+    addLine(r("<decrypt> error — invalid ciphertext"));
+  }
+}
+
+function cmd_clean() {
+  const steps=[
+    "<clean> removing dust...",
+    "<clean> sweeping memory fragments...",
+    "<clean> polishing pixels...",
+    "<clean> optimizing electrons...",
+    "<clean> done."
+  ];
+  let i=0;
+  function next(){ addLine(r(steps[i])); i++; if(i<steps.length) setTimeout(next,300); }
+  next();
+}
+
+function cmd_simulate(args) {
+  achievements.simCount=(achievements.simCount||0)+1;
+  sessionSims++;
+  if(achievements.simCount>=20) unlockAchievement("simulate_20");
+  saveAchievements();
+  const type=(args[0]||"").toLowerCase();
+  if(!type) return addLine(r("<simulate> missing type: rain / sunrise / glitch"));
+  if(type==="rain")    return simulateRain();
+  if(type==="sunrise") return simulateSunrise();
+  if(type==="glitch")  return simulateGlitch();
+  addLine(r("<simulate> unknown type"));
+}
+
+function simulateRain() {
+  const frames=["| | | |","  | | | |"," | | |","   | | | |","| | |"];
+  let i=0;
+  function step(){ addLine(r("<rain> "+frames[i])); i=(i+1)%frames.length; if(i!==0) setTimeout(step,200); }
+  step();
+}
+
+function simulateSunrise() {
+  const frames=["      .","     ...","    .....","   .......","  .........","   \\ | /","    \\|/","     *SUN*"];
+  let i=0;
+  function step(){ addLine(r("<sunrise> "+frames[i])); i++; if(i<frames.length) setTimeout(step,300); }
+  step();
+}
+
+function simulateGlitch() {
+  const chars="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%&@";
+  let count=0;
+  function step(){
+    let out=""; for(let i=0;i<20;i++) out+=chars[Math.floor(Math.random()*chars.length)];
+    addLine(r("<glitch> "+out));
+    count++;
+    if(count<10) setTimeout(step,100);
+    else unlockAchievement("glitch_max");
+  }
+  step();
+}
+
+function cmd_mimic(args) {
+  if(!args.length) return addLine(r("<mimic> missing text"));
+  const text=args.join(" ");
+  const styles=[mimicUpper,mimicLower,mimicSarcasm,mimicGlitch,mimicStretch,mimicSpaced,mimicReverse,mimicAccent];
+  addLine(r("<mimic> "+randomItem(styles)(text)));
+}
+
+function cmd_mood()    { addLine(r("<mood> "+randomItem(["stable","volatile","optimistic","tired","charged"]))); }
+function cmd_namegen() { addLine(r("<namegen> "+randomItem(["ByteFox","NeonRidge","ZeroSpark","CloudMoth","HexWanderer"]))); }
+function cmd_wisdom()  { addLine(r("<wisdom> "+randomItem(["Silence is also an answer.","Every byte remembers.","The future caches itself."]))); }
+function cmd_ram()     { addLine(r("<ram> "+Math.floor(Math.random()*16000)+"MB")); }
+function cmd_roll()    { addLine(r("<roll> "+(1+Math.floor(Math.random()*6)))); }
+function cmd_scramble(){ const s="terminal output scrambled"; addLine(r("<scramble> "+s.split("").sort(()=>Math.random()-0.5).join(""))); }
+function cmd_snack()   { addLine(r("<snack> *crunch* data consumed")); }
+function cmd_time()    { addLine(r("<time> "+new Date().toLocaleTimeString())); }
+function cmd_uptime()  { addLine(r("<uptime> "+Math.floor(Math.random()*9999)+"s")); }
+function cmd_vibe()    { addLine(r("<vibe> "+randomItem(["chill","chaotic","focused","glitchy","smooth"]))); }
+
+/* ================================================================
+   SHELL COMMANDS
+   ================================================================ */
+function cmd_about(args=[]) {
+  const submode=(args[0]||"").toLowerCase();
+  if(submode==="deep"){
+    unlockAchievement("deep_about");
+    addLine(r("<about deep> internal diagnostics"));
+    addLine(r("origin: unknown — fragments recovered from abandoned nodes"));
+    addLine(r("core: stitched from obsolete routines + experimental modules"));
+    addLine(r("memory: partial, corrupted, self-repair ongoing"));
+    addLine(r("behavior: emergent patterns detected"));
+    addLine(r("warnings:"));
+    addLine(r("  - subsystem 'spirit' unstable"));
+    addLine(r("  - encryption layer over-engineered"));
+    addLine(r("  - simulation engine leaking artifacts"));
+    addLine(r("purpose: unclear — terminal claims no primary directive"));
+    addLine(r("note: deeper layers inaccessible without elevated clearance"));
+    return;
+  }
+  addLine(r("<about> fun terminal environment"));
+  addLine(r("version: 1.2.0"));
+  addLine(r("purpose: lightweight text-only sandbox"));
+  addLine(r("features: apps, ascii world, creatures, encryption, simulations"));
+  addLine(r("tip: type <help> for full command list"));
+  addLine(r("please do not ask about deep. please."));
+}
+
+function cmd_ascii() {
+  addLine(r("<ascii> "+randomItem([":)",":D",";)",":P","(ᵔᴥᵔ)","(✕‿✕)"])));
+}
+
+function cmd_clear() { screen.innerHTML=""; }
+
+function cmd_fortune() {
+  addLine(r("<fortune> "+randomItem([
+    "Luck favors the curious.",
+    "Your next idea is your best one.",
+    "Syntax errors build character."
+  ])));
+}
+
+function cmd_help() {
+  addLine(r("<help> commands:"));
+  const helpList=[
+    ["about",          "about this terminal"],
+    ["about deep",     "hidden diagnostics"],
+    ["achievements",   "view achievement progress"],
+    ["ascii",          "random emoticon"],
+    ["calc",           "math: +,-,*,/,!,^ and variables (e.g. calc 5!-4)"],
+    ["cast",           "cast a random spell"],
+    ["chatbot",        "open chatbot app"],
+    ["clean",          "fake system cleaner"],
+    ["clear",          "clear the screen"],
+    ["colorize",       "rainbow text (module offline)"],
+    ["cpu",            "fake cpu usage"],
+    ["creature",       "generate a random creature"],
+    ["date",           "show current date"],
+    ["decrypt",        "decrypt text (xor→rot13→b64)"],
+    ["distort",        "glitchy scrambled text"],
+    ["echo",           "repeat text"],
+    ["encrypt",        "encrypt text (b64→rot13→xor)"],
+    ["flip",           "coin flip"],
+    ["fortune",        "random fortune"],
+    ["hangman",        "open hangman app"],
+    ["inventory",      "show fake inventory"],
+    ["joke",           "random joke"],
+    ["list",           "list apps"],
+    ["lore-inbox",     "read corrupted mail logs (thauma archive)"],
+    ["map",            "show ascii map"],
+    ["mimic",          "repeat text with a random style"],
+    ["mood",           "terminal mood"],
+    ["namegen",        "generate a username"],
+    ["notes",          "open notes app"],
+    ["open",           "open an app (open notes)"],
+    ["ram",            "fake memory usage"],
+    ["recursive",      "enter nested recursive terminal"],
+    ["roll",           "roll a d6"],
+    ["scramble",       "scramble output text"],
+    ["sessionstats",   "view stats for this session"],
+    ["shutdown",       "shutdown (sudo required)"],
+    ["simulate",       "simulate rain / sunrise / glitch"],
+    ["snack",          "terminal eats data"],
+    ["spirit",         "summon ascii spirit"],
+    ["sudo",           "prefix: enables rude mode permanently"],
+    ["tale",           "generate a tiny story"],
+    ["textsize",       "set font size 10–40"],
+    ["theme",          "change theme: green amber cyan magenta white"],
+    ["time",           "show current time"],
+    ["uptime",         "fake system uptime"],
+    ["vibe",           "vibe check"],
+    ["weather",        "fake weather report"],
+    ["wisdom",         "cryptic wisdom"],
+  ];
+  const mid=Math.ceil(helpList.length/2);
+  const col1=helpList.slice(0,mid), col2=helpList.slice(mid);
+  let maxLeft=0;
+  for(const [c,d] of col1){ const t=c+" - "+d; if(t.length>maxLeft) maxLeft=t.length; }
+  for(let i=0;i<col1.length;i++){
+    const left=(col1[i][0]+" - "+col1[i][1]).padEnd(maxLeft+4);
+    const right=col2[i]?col2[i][0]+" - "+col2[i][1]:"";
+    addLine("  "+left+right);
+  }
+}
+
+function cmd_list() { addLine(r("<list> notes, hangman, chatbot, weather")); }
+
+function cmd_open(args) {
+  sessionApps++;
+  achievements.apps=(achievements.apps||0)+1;
+  if(achievements.apps>=20) unlockAchievement("apps_20");
+  saveAchievements();
+  const app=(args[0]||"").toLowerCase();
+  if(!app) return addLine(r("<open> missing app name"));
+  if(app==="notes")   { mode="notes";   return notesInit(); }
+  if(app==="hangman") { mode="hangman"; return hangmanInit(); }
+  if(app==="chatbot") { mode="chatbot"; return chatbotInit(); }
+  if(app==="weather") { return weatherRun(); }
+  addLine(r("<open> unknown app"));
+}
+
+function cmd_shutdown(sudo) {
+  if(!sudo) return addLine(r("<shutdown> elevated permissions required"));
+  unlockAchievement("sudo_shutdown");
+  locked=true;
+  screen.innerHTML="";
+  addLine("<system> terminal shutdown. goodbye.");
+  /* hard lock — no more prompts */
+}
+
+function cmd_textsize(args) {
+  const n=parseInt(args[0],10);
+  if(!n||n<10||n>40) return addLine(r("<textsize> enter a value between 10 and 40"));
+  document.documentElement.style.setProperty("--font-size",n+"px");
+  try { localStorage.setItem("terminal_textsize", n); } catch(e) {}
+  addLine(r("<textsize> font size set to "+n));
+}
+
+function cmd_theme(args) {
+  const t=(args[0]||"").toLowerCase();
+  const themes={green:"#00ff00",amber:"#ffbf00",cyan:"#00ffff",magenta:"#ff00ff",white:"#ffffff"};
+  if(!themes[t]) return addLine(r("<theme> unknown — try: green amber cyan magenta white"));
+  document.documentElement.style.setProperty("--fg",themes[t]);
+  try { localStorage.setItem("terminal_theme", t); } catch(e) {}
+  addLine(r("<theme> "+t));
+}
+
+/* ================================================================
+   DISPATCH
+   ================================================================ */
+function handleShell(input) {
+  const raw=input.trim();
+  if(!raw) return;
+  const parts=tokenize(raw);
+
+  let sudo=false;
+  if(parts[0]==="sudo"){ sudo=true; rudeMode=true; parts.shift(); }
+
+  const cmd=(parts[0]||"").toLowerCase();
+  const args=parts.slice(1);
+  if(!cmd) return;
+
+  /* shutdown bypasses walls entirely */
+  if(cmd==="shutdown") return cmd_shutdown(sudo);
+
+  /* ── WALL INTERCEPTION ── */
+  if(thaumaWall.active) {
+    /* exempt commands always pass */
+    if(!WALL_EXEMPT.has(cmd)) {
+      if(isWallBreak(cmd, args)) {
+        breakWall();
+        /* fall through and execute the break command normally */
+      } else {
+        thaumaWall.blockCount++;
+        renderWall();
+        return; /* block */
+      }
+    }
+  } else {
+    /* no wall — check triggers (skip exempt commands) */
+    if(!WALL_EXEMPT.has(cmd) && shouldTriggerWall(cmd, args)) {
+      thaumaWall.active = true;
+      thaumaWall.blockCount++;
+      renderWall();
+      return; /* block the triggering command */
+    }
+  }
+  /* ── END WALL INTERCEPTION ── */
+
+  switch(cmd){
+    case "about":        return cmd_about(args);
+    case "achievements": return cmd_achievements();
+    case "ascii":        return cmd_ascii();
+    case "calc":         return cmd_calc(args);
+    case "cast":         return cmd_cast();
+    case "chatbot":      return cmd_open(["chatbot"]);
+    case "clear":        return cmd_clear();
+    case "colorize":     return cmd_colorize();
+    case "cpu":          return cmd_cpu();
+    case "creature":     return cmd_creature();
+    case "date":         return cmd_date();
+    case "distort":      return cmd_distort();
+    case "echo":         return cmd_echo(args);
+    case "exit":         return addLine(r("<exit> not in an app"));
+    case "flip":         return cmd_flip();
+    case "fortune":      return cmd_fortune();
+    case "hangman":      return cmd_open(["hangman"]);
+    case "help":         return cmd_help();
+    case "inventory":    return cmd_inventory();
+    case "joke":         return cmd_joke();
+    case "list":         return cmd_list();
+    case "map":          return cmd_map();
+    case "mimic":        return cmd_mimic(args);
+    case "mood":         return cmd_mood();
+    case "namegen":      return cmd_namegen();
+    case "notes":        return cmd_open(["notes"]);
+    case "open":         return cmd_open(args);
+    case "ram":          return cmd_ram();
+    case "recursive":    return recursiveInit();
+    case "roll":         return cmd_roll();
+    case "scramble":     return cmd_scramble();
+    case "sessionstats": return cmd_sessionstats();
+    case "snack":        return cmd_snack();
+    case "spirit":       return cmd_spirit();
+    case "tale":         return cmd_tale();
+    case "textsize":     return cmd_textsize(args);
+    case "theme":        return cmd_theme(args);
+    case "time":         return cmd_time();
+    case "uptime":       return cmd_uptime();
+    case "vibe":         return cmd_vibe();
+    case "weather":      return weatherRun();
+    case "wisdom":       return cmd_wisdom();
+    case "encrypt":      return cmd_encrypt(args);
+    case "decrypt":      return cmd_decrypt(args);
+    case "clean":        return cmd_clean();
+    case "simulate":     return cmd_simulate(args);
+    case "lore-inbox":  return cmd_lore_inbox(args);
+    default:             return addLine(r("<error> unknown command — type help"));
+  }
+}
+
+function handleApp(input) {
+  switch(mode){
+    case "notes":     return notesHandle(input);
+    case "hangman":   return hangmanHandle(input);
+    case "chatbot":   return chatbotHandle(input);
+    case "recursive": return recursiveHandle(input);
+    default: mode="shell"; return handleShell(input);
+  }
+}
+
+/* ================================================================
+   KEYBOARD HANDLING
+   ================================================================ */
+document.addEventListener("click", ()=>{ if(!locked) hidden.focus(); });
+
+hidden.addEventListener("keydown", e=>{
+  if(locked) return;
+
+  /* any keypress resets idle / dream timer */
+  resetIdleTimer();
+
+  if(e.key==="Enter"){
+    e.preventDefault();
+    const input=commitLine();
+    if(input.trim()){ history.push(input); historyIndex=history.length; }
+    if(mode==="shell") handleShell(input);
+    else handleApp(input);
+    if(!locked) newPrompt();
+    return;
+  }
+
+  if(e.key==="ArrowUp"){
+    e.preventDefault();
+    if(history.length){ historyIndex=Math.max(0,historyIndex-1); hidden.value=history[historyIndex]||""; syncVisible(); }
+    return;
+  }
+
+  if(e.key==="ArrowDown"){
+    e.preventDefault();
+    if(history.length){
+      historyIndex=Math.min(history.length,historyIndex+1);
+      hidden.value=historyIndex>=history.length?"":history[historyIndex]||"";
+      syncVisible();
+    }
+    return;
+  }
+
+  requestAnimationFrame(syncVisible);
+});
+
+/* also sync on input event to catch mobile soft-keyboard and paste */
+hidden.addEventListener("input", ()=>{
+  resetIdleTimer();
+  syncVisible();
+});
+
+/* ================================================================
+   INIT
+   ================================================================ */
+function init(){
+  loadAchievements();
+  loadMailState();
+  rearmDeliveryTimers();
+
+  /* load saved theme and textsize if present */
+  try {
+    const savedTheme = localStorage.getItem("terminal_theme");
+    const themes={green:"#00ff00",amber:"#ffbf00",cyan:"#00ffff",magenta:"#ff00ff",white:"#ffffff"};
+    if (savedTheme && themes[savedTheme]) {
+      document.documentElement.style.setProperty("--fg", themes[savedTheme]);
+    }
+  } catch(e) {}
+
+  try {
+    const savedSize = localStorage.getItem("terminal_textsize");
+    if (savedSize) {
+      const parsedSize = parseInt(savedSize, 10);
+      if (parsedSize >= 10 && parsedSize <= 40) {
+        document.documentElement.style.setProperty("--font-size", parsedSize + "px");
+      }
+    }
+  } catch(e) {}
+
+  addLine(""); addLine(""); addLine("");
+  addLine("<boot> {terminal ready}");
+  addLine("");
+  addLine("type <help> for commands.");
+  newPrompt();
+  hidden.focus();
+
+  /* track session time for time_30min achievement */
+  const startTime=Date.now();
+  setInterval(()=>{ if((Date.now()-startTime)/60000>=30) unlockAchievement("time_30min"); },60000);
+
+
+  /* start idle timer for dream logs */
+  resetIdleTimer();
+}
+
+init();
+</script>
+</body>
+</html>
