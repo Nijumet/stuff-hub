@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Web Terminal</title>
+
+<!-- ============================================================
+     BASIC STYLING — GREEN ON BLACK, RETRO TERMINAL LOOK
+     ============================================================ -->
+<style>
+:root {
+  --bg: #000000;
+  --fg: #00ff00;
+  --font-size: 16px;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000;
+  color: #00ff00;
+  font-family: Consolas, monospace;
+  font-size: var(--font-size);
+
+  /* important: respect device safe area (iOS, etc.) */
+  padding-top: env(safe-area-inset-top);
+  box-sizing: border-box;
+}
+
+
+#screen {
+  height: 100vh;
+  padding: 24px 10px 10px 10px;  /* top padding pushes text down */
+  box-sizing: border-box;        /* so padding doesn't overflow */
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+
+.line {
+  width: 100%;
+}
+
+.system {
+  color: var(--fg);
+}
+
+.user {
+  color: var(--fg);
+}
+
+.prompt-line {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+}
+
+.prompt-label {
+  margin-right: 6px;
+}
+
+.prompt-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font: inherit;
+  pointer-events: none;  /* FIX: prevent visible input from stealing focus/clicks */
+  user-select: none;
+}
+
+.hidden-input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+</style>
+</head>
+
+<body>
+<!-- ============================================================
+     TERMINAL OUTPUT AREA + HIDDEN INPUT FOR KEY CAPTURE
+     ============================================================ -->
+<div id="screen"></div>
+<input id="hidden" class="hidden-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+<script>
+/* ============================================================
+   CORE STATE
+   ============================================================ */
+
+const screen = document.getElementById("screen");
+const hidden = document.getElementById("hidden");
+
+let history = [];
+let historyIndex = 0;
+
+let currentPrompt = null;
+let currentInput = null;
+
+let rudeMode = false;   // becomes true after any sudo
+let mode = "shell";     // "shell" or app name
+let appState = {};      // per-app state
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+
+function addLine(text, cls = "system") {
+  const div = document.createElement("div");
+  div.className = "line " + cls;
+  div.textContent = text;
+  screen.appendChild(div);
+  screen.scrollTop = screen.scrollHeight;
+}
+
+function newPrompt() {
+  const div = document.createElement("div");
+  div.className = "line prompt-line";
+
+  const label = document.createElement("span");
+  label.className = "prompt-label";
+  label.textContent = mode === "shell" ? ">" : "[" + mode + "]>";
+  div.appendChild(label);
+
+  const input = document.createElement("input");
+  input.className = "prompt-input";
+  input.type = "text";
+  input.readOnly = true;      // FIX: prevent keyboard from popping up on mobile tap
+  input.tabIndex = -1;        // FIX: exclude from tab order so focus stays on hidden
+  div.appendChild(input);
+
+  screen.appendChild(div);
+  screen.scrollTop = screen.scrollHeight;
+
+  currentPrompt = div;
+  currentInput = input;
+
+  hidden.value = "";
+  hidden.focus();
+  syncVisibleInput();
+}
+
+function syncVisibleInput() {
+  if (currentInput) currentInput.value = hidden.value;
+}
+
+function commitLine() {
+  if (!currentInput) return "";
+  const text = currentInput.value;
+  currentInput.disabled = true;
+  currentInput = null;
+  return text;
+}
+
+function normalize(str) {
+  return str.trim().toLowerCase();
+}
+
+function tokenize(str) {
+  return str.trim().split(/\s+/);
+}
+
+function randomItem(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+/* ============================================================
+   SUDO ATTITUDE
+   ============================================================ */
+
+function rude(text) {
+  if (!rudeMode) return text;
+  const tails = [
+    "really?", "pathetic.", "try harder.", "unimpressive.",
+    "wow.", "tragic.", "embarrassing.", "sad."
+  ];
+  return text + " " + randomItem(tails);
+}
+
+/* ============================================================
+   COMMAND LIST FOR HELP (ALPHABETICAL, FLAT)
+   ============================================================ */
+
+const COMMANDS = [
+  "about",
+  "ascii",
+  "calc",
+  "chatbot",
+  "clear",
+  "echo",
+  "exit",
+  "help",
+  "notes",
+  "open",
+  "time"
+];
+
+/* ============================================================
+   APPS
+   ============================================================ */
+
+/* ---------------- NOTES APP ---------------- */
+function notesInit() {
+  if (!appState.notes) appState.notes = [];
+  addLine("<notes> add/list/clear/exit");
+}
+
+function notesHandle(input) {
+  const parts = tokenize(input);
+  const cmd = (parts[0] || "").toLowerCase();
+  const rest = parts.slice(1).join(" ");
+
+  if (cmd === "add") {
+    if (!rest) return addLine("<notes> missing text");
+    appState.notes.push(rest);
+    addLine("<notes> saved");
+    return;
+  }
+  if (cmd === "list") {
+    if (!appState.notes.length) return addLine("<notes> empty");
+    appState.notes.forEach((n, i) => addLine((i + 1) + ": " + n));
+    return;
+  }
+  if (cmd === "clear") {
+    appState.notes = [];
+    return addLine("<notes> cleared");
+  }
+  if (cmd === "exit") {
+    mode = "shell";
+    return addLine("<notes> closed");
+  }
+  addLine("<notes> unknown");
+}
+
+/* ---------------- CHATBOT APP ---------------- */
+function chatbotInit() {
+  if (!appState.chatbot) {
+    appState.chatbot = { lastTopic: null };
+  }
+  addLine("<chatbot> talk, exit to quit");
+}
+
+function chatbotHandle(input) {
+  const t = input.trim().toLowerCase();
+  const bot = appState.chatbot;
+
+  if (t === "exit") {
+    mode = "shell";
+    return addLine("<chatbot> closed");
+  }
+
+  // --- GREETINGS ---
+  if (/(hello|hi|hey|yo|sup)/.test(t)) {
+    bot.lastTopic = "greeting";
+    return addLine("<chatbot> hello");
+  }
+
+  // --- FEELINGS ---
+  if (/how are/.test(t)) {
+    bot.lastTopic = "feelings";
+    const moods = ["operational", "stable", "slightly chaotic", "optimizing", "debugging itself"];
+    return addLine("<chatbot> " + randomItem(moods));
+  }
+
+  // --- USER EMOTIONS ---
+  if (/sad|tired|angry|upset|frustrated/.test(t)) {
+    bot.lastTopic = "emotion";
+    return addLine("<chatbot> noted. emotional variance detected.");
+  }
+
+  // --- QUESTIONS ---
+  if (t.endsWith("?")) {
+    bot.lastTopic = "question";
+    const replies = [
+      "uncertain. data insufficient.",
+      "processing… no conclusion.",
+      "answer unclear.",
+      "cannot compute that.",
+      "maybe. maybe not."
+    ];
+    return addLine("<chatbot> " + randomItem(replies));
+  }
+
+  // --- NAME ---
+  if (/your name/.test(t)) {
+    bot.lastTopic = "identity";
+    return addLine("<chatbot> no name. unnecessary.");
+  }
+
+  // --- MEMORY CALLBACK ---
+  if (/why|because/.test(t) && bot.lastTopic) {
+    return addLine("<chatbot> related to previous topic: " + bot.lastTopic);
+  }
+
+  // --- GENERIC SMALL TALK ---
+  const generic = [
+    "acknowledged.",
+    "input stored.",
+    "interesting.",
+    "noted.",
+    "processing.",
+    "statement accepted."
+  ];
+  return addLine("<chatbot> " + randomItem(generic));
+}
+
+
+/* ============================================================
+   FUN + CREATIVE COMMANDS
+   ============================================================ */
+
+// persistent variable store
+const calcVars = {};
+
+function cmd_calc(args) {
+  if (!args.length) return addLine("<calc> missing");
+
+  const input = args.join(" ");
+
+  try {
+    const result = calcEvaluateChain(input);
+    addLine("<calc> " + result);
+  } catch (e) {
+    addLine("<calc> error");
+  }
+}
+
+function calcEvaluateChain(text) {
+  const parts = text.split(/\s+/);
+  let lastValue = null;
+
+  for (let part of parts) {
+    if (!part.trim()) continue;
+    lastValue = calcEvaluate(part);
+  }
+
+  return lastValue;
+}
+
+function calcEvaluate(expr) {
+  // assignment: a=b or 5!=x
+  if (expr.includes("=")) {
+    const [left, right] = expr.split("=");
+    const value = calcEvaluate(right);
+    calcVars[left] = value;
+    return value;
+  }
+
+  // replace variables
+  expr = expr.replace(/[a-zA-Z]+/g, v => {
+    if (calcVars[v] !== undefined) return calcVars[v];
+    throw "unknown variable";
+  });
+
+  // factorial
+  expr = expr.replace(/(\d+)!/g, (_, n) => factorial(parseInt(n)));
+
+  // power ^
+  expr = expr.replace(/(\d+)\^(\d+)/g, (_, a, b) => Math.pow(a, b));
+
+  // now evaluate safely
+  return safeEval(expr);
+}
+
+function safeEval(expr) {
+  if (!/^[0-9+\-*/().\s]+$/.test(expr)) throw "bad expr";
+  return Function("return " + expr)();
+}
+
+function factorial(n) {
+  let r = 1;
+  for (let i = 2; i <= n; i++) r *= i;
+  return r;
+}
+
+function cmd_echo(args) {
+  addLine("<echo> " + args.join(" "));
+}
+
+function cmd_time() {
+  addLine("<time> " + new Date().toLocaleTimeString());
+}
+
+/* ============================================================
+   SHELL COMMANDS
+   ============================================================ */
+
+function cmd_about(args = []) {
+  // --- NORMAL ABOUT ---
+  addLine(rude("<about> fun terminal environment"));
+  addLine("version: 1.0.0");
+  addLine("purpose: lightweight text‑only sandbox");
+  addLine("features: apps, ascii world");
+  addLine("tip: type <help> for full command list");
+}
+
+
+
+function cmd_ascii() {
+  const faces = [":)", ":D", ";)", ":P", "(ᵔᴥᵔ)", "(◕‿◕)"];
+  addLine(rude("<ascii> " + randomItem(faces)));
+}
+
+function cmd_clear() {
+  screen.innerHTML = "";
+}
+
+function cmd_help() {
+  addLine("<help> commands:");
+
+  const helpList = [
+    ["about", "about this terminal"],
+    ["ascii", "random emoticon"],
+    ["calc", "math expression, supports +,-,*,/,!,^, and variables (calc 5!-4)"],
+    ["chatbot", "open chatbot app"],
+    ["clear", "clear the screen"],
+    ["echo", "repeat text"],
+    ["exit", "exit an app"],
+    ["notes", "open notes app"],
+    ["open", "open an app (open notes)"],
+    ["time", "show current time"]
+  ];
+
+  // split into two columns
+  const mid = Math.ceil(helpList.length / 2);
+  const col1 = helpList.slice(0, mid);
+  const col2 = helpList.slice(mid);
+
+  // compute max width of left column entries
+  let maxLeft = 0;
+  for (const [cmd, desc] of col1) {
+    const text = `${cmd} - ${desc}`;
+    if (text.length > maxLeft) maxLeft = text.length;
+  }
+
+  // print aligned rows
+  for (let i = 0; i < col1.length; i++) {
+    const left = `${col1[i][0]} - ${col1[i][1]}`.padEnd(maxLeft + 4);
+    const right = col2[i] ? `${col2[i][0]} - ${col2[i][1]}` : "";
+    addLine("  " + left + right);
+  }
+}
+
+
+
+function cmd_open(args) {
+  const app = (args[0] || "").toLowerCase();
+  if (!app) return addLine(rude("<open> missing"));
+
+  if (app === "notes") {
+    mode = "notes";
+    return notesInit();
+  }
+  if (app === "chatbot") {
+    mode = "chatbot";
+    return chatbotInit();
+  }
+
+  addLine(rude("<open> unknown"));
+}
+
+/* ============================================================
+   DISPATCH
+   ============================================================ */
+
+function handleShell(input) {
+  const raw = input.trim();
+  if (!raw) return;
+
+  const parts = tokenize(raw);
+
+  if (parts[0] === "sudo") {
+    rudeMode = true;
+    parts.shift();
+  }
+
+  const cmd = (parts[0] || "").toLowerCase();
+  const args = parts.slice(1);
+
+  if (!cmd) return;
+
+  switch (cmd) {
+    case "about": return cmd_about(args);
+    case "ascii": return cmd_ascii();
+    case "calc": return cmd_calc(args);
+    case "chatbot": return cmd_open(["chatbot"]);
+    case "clear": return cmd_clear();
+    case "echo": return cmd_echo(args);
+    case "exit": return addLine(rude("<exit> no-op"));
+    case "help": return cmd_help();
+    case "notes": return cmd_open(["notes"]);
+    case "open": return cmd_open(args);
+    case "time": return cmd_time();
+
+    default:
+      return addLine(rude("<error> unknown"));
+  }
+}
+
+function handleApp(input) {
+  switch (mode) {
+    case "notes": return notesHandle(input);
+    case "chatbot": return chatbotHandle(input);
+    default:
+      mode = "shell";
+      return handleShell(input);
+  }
+}
+
+/* ============================================================
+   KEYBOARD HANDLING
+   ============================================================ */
+
+// FIX: clicking anywhere on the screen re-focuses the hidden input
+document.addEventListener("click", () => {
+  hidden.focus();
+});
+
+// keyboard handling
+hidden.addEventListener("keydown", (e) => {
+  // ENTER
+  if (e.key === "Enter") {
+    e.preventDefault();
+
+    const input = hidden.value;
+    commitLine();
+
+    if (input.trim()) {
+      history.push(input);
+      historyIndex = history.length;
+    }
+
+    hidden.value = "";
+
+    if (mode === "shell") {
+      handleShell(input);
+    } else {
+      handleApp(input);
+    }
+
+    newPrompt();
+    return;
+  }
+
+  // HISTORY UP
+  if (e.key === "ArrowUp") {
+    e.preventDefault();
+
+    if (history.length) {
+      historyIndex = Math.max(0, historyIndex - 1);
+      hidden.value = history[historyIndex] || "";
+      syncVisibleInput();
+    }
+
+    return;
+  }
+
+  // HISTORY DOWN
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+
+    if (history.length) {
+      historyIndex = Math.min(history.length, historyIndex + 1);
+
+      if (historyIndex >= history.length) {
+        hidden.value = "";
+      } else {
+        hidden.value = history[historyIndex] || "";
+      }
+
+      syncVisibleInput();
+    }
+
+    return;
+  }
+
+  // sync visible input after typing
+  requestAnimationFrame(syncVisibleInput);
+});
+
+/* ============================================================
+   INIT
+   ============================================================ */
+
+function init() {
+  // push everything down a bit
+  addLine("");
+  addLine("");
+  addLine("");
+
+  addLine("<boot> {terminal ready}");
+  addLine("");
+  addLine("type <help> for commands.");
+  newPrompt();
+  hidden.focus();
+}
+
+init();
+</script>
+</body>
+</html>
